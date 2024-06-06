@@ -1,0 +1,113 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'AWS_ACCESS_KEY', defaultValue: '', description: 'AWS access key')
+        string(name: 'AWS_SECRET_KEY', defaultValue: '', description: 'AWS secret key')
+        string(name: 'INSTANCE_NAME', defaultValue: 'ExampleInstance', description: 'The name of the instance')
+        string(name: 'INSTANCE_TYPE', defaultValue: 't2.micro', description: 'The type of the instance')
+        string(name: 'AMI_ID', defaultValue: 'ami-0c55b159cbfafe1f0', description: 'The ID of the AMI to use for the instance')
+        string(name: 'VOLUME_SIZE', defaultValue: '8', description: 'The size of the root volume in GB')
+        string(name: 'SUBNET_ID', defaultValue: '', description: 'The ID of the subnet to launch the instance in')
+        string(name: 'KEY_NAME', defaultValue: '', description: 'The name of the key pair to use for the instance')
+        booleanParam(name: 'DESTROY', defaultValue: false, description: 'Check this to destroy the infrastructure')
+    }
+
+    environment {
+        TF_VAR_aws_access_key = "${params.AWS_ACCESS_KEY}"
+        TF_VAR_aws_secret_key = "${params.AWS_SECRET_KEY}"
+        TF_VAR_instance_name = "${params.INSTANCE_NAME}"
+        TF_VAR_instance_type = "${params.INSTANCE_TYPE}"
+        TF_VAR_ami_id = "${params.AMI_ID}"
+        TF_VAR_volume_size = "${params.VOLUME_SIZE}"
+        TF_VAR_subnet_id = "${params.SUBNET_ID}"
+        TF_VAR_key_name = "${params.KEY_NAME}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                // Checkout your Terraform configuration from version control
+                git 'https://your-repo-url/your-terraform-config-repo.git'
+            }
+        }
+        
+        stage('Init Terraform') {
+            steps {
+                sh 'terraform init'
+            }
+        }
+        
+        stage('Plan Terraform') {
+            when {
+                expression { return !params.DESTROY }
+            }
+            steps {
+                sh 'terraform plan -out=tfplan'
+            }
+        }
+
+        stage('Manual Approval') {
+            when {
+                expression { return !params.DESTROY }
+            }
+            steps {
+                input message: 'Do you want to apply the Terraform plan?', ok: 'Apply'
+            }
+        }
+        
+        stage('Apply Terraform') {
+            when {
+                expression { return !params.DESTROY }
+            }
+            steps {
+                sh 'terraform apply -auto-approve tfplan'
+            }
+        }
+
+        stage('Find Instance to Destroy') {
+            when {
+                expression { return params.DESTROY }
+            }
+            steps {
+                script {
+                    // Find the instance ID based on the instance name
+                    def instanceId = sh(script: """
+                        aws ec2 describe-instances --filters "Name=tag:Name,Values=${params.INSTANCE_NAME}" --query "Reservations[*].Instances[*].InstanceId" --output text --region us-east-1
+                    """, returnStdout: true).trim()
+                    
+                    if (!instanceId) {
+                        error "Instance with name ${params.INSTANCE_NAME} not found."
+                    }
+                    
+                    env.INSTANCE_ID = instanceId
+                }
+            }
+        }
+        
+        stage('Manual Approval for Destroy') {
+            when {
+                expression { return params.DESTROY }
+            }
+            steps {
+                input message: "Do you want to destroy the instance with ID ${env.INSTANCE_ID}?", ok: 'Destroy'
+            }
+        }
+
+        stage('Destroy Terraform') {
+            when {
+                expression { return params.DESTROY }
+            }
+            steps {
+                sh 'terraform destroy -target aws_instance.example -var "aws_access_key=${params.AWS_ACCESS_KEY}" -var "aws_secret_key=${params.AWS_SECRET_KEY}" -var "instance_name=${params.INSTANCE_NAME}" -var "instance_type=${params.INSTANCE_TYPE}" -var "ami_id=${params.AMI_ID}" -var "volume_size=${params.VOLUME_SIZE}" -var "subnet_id=${params.SUBNET_ID}" -var "key_name=${params.KEY_NAME}" -auto-approve'
+            }
+        }
+    }
+
+    post {
+        cleanup {
+            // Clean up workspace, if necessary
+            cleanWs()
+        }
+    }
+}
